@@ -5,16 +5,10 @@ use std::fs::{self, create_dir, create_dir_all};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
-use recon_ui::config::{ReconConfig, TomlConfig, UserInput, UserProfile, RECON_SETTINGS_FILENAME};
-use recon_ui::env::{prompt_yes_no, Environment};
-use recon_ui::error::{ReconError};
+use crate::config::{ReconConfig, TomlConfig, UserInput, UserProfile, RECON_SETTINGS_FILENAME};
+use crate::env::{prompt_yes_no, Environment};
+use crate::error::{ReconError};
 use headfile::common::ArchiveParams;
-
-fn main() {
-
-}
-
-
 
 #[derive(Serialize, Deserialize)]
 /// this struct holds every configuration needed to run a recon
