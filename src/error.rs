@@ -1,41 +1,40 @@
-use crate::environment::EnvError;
-use crate::recon_pipeline::TaskReturnCode;
-use crate::resource_manager::request::RequestError;
+
 use std::error::Error;
 use std::fmt::{write, Display};
+use std::io;
 use std::path::PathBuf;
+use object_manager::RequestError;
+use crate::env::EnvError;
 
 #[derive(Debug)]
 pub enum ReconError {
     ImageReconstruction(ImageReconstructionError),
     ImageWriter(ImageWriterError),
     Resource(ResourceError),
-    Preprocessor(Box<dyn Error>),
-    Config(ConfigError),
-    Generic(Box<dyn Error>),
+    Preprocessor(String),
+    Config(String),
+    Generic(String),
     SSHConnectionFailed(String),
     InvalidImageDestination(PathBuf),
     InvalidRawDataSource(PathBuf),
     Environment(EnvError),
     AlreadyExists(PathBuf),
-    MaxRetriesReached(Box<Self>),
+    MaxRetriesReached(String),
     UserCanceled,
+    IO(String),
+}
+
+impl From<io::Error> for ReconError {
+    fn from(value: io::Error) -> Self {
+        Self::IO(value.to_string())
+    }
 }
 
 pub trait IsRecoverable {
     fn is_recoverable(&self) -> bool;
 }
 
-impl ReconError {
-    pub fn return_code(&self) -> TaskReturnCode {
-        if self.is_recoverable() {
-            TaskReturnCode::WillRetry
-        } else {
-            println!("terminal error encountered: {:?}", self);
-            TaskReturnCode::TerminalError
-        }
-    }
-}
+
 
 impl IsRecoverable for ReconError {
     fn is_recoverable(&self) -> bool {
@@ -99,25 +98,6 @@ pub enum ResourceError {
     DataRequest(RequestError),
 }
 
-#[derive(Debug)]
-pub enum ConfigError {
-    Read(PathBuf),
-    Write(PathBuf),
-    Parse(String),
-    Serialize,
-}
-
-impl Display for ConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self {
-            ConfigError::Read(path) => write!(f, "failed to read {}", path.to_string_lossy()),
-            ConfigError::Write(path) => write!(f, "failed to write {}", path.to_string_lossy()),
-            ConfigError::Serialize => write!(f, "serde serialization failed"),
-            ConfigError::Parse(s) => write!(f, "failed to parse: \n {}", s),
-        }
-    }
-}
-
 impl From<EnvError> for ReconError {
     fn from(value: EnvError) -> Self {
         Self::Environment(value)
@@ -139,17 +119,5 @@ impl From<ImageReconstructionError> for ReconError {
 impl From<ImageWriterError> for ReconError {
     fn from(value: ImageWriterError) -> Self {
         ReconError::ImageWriter(value)
-    }
-}
-
-impl From<ConfigError> for ReconError {
-    fn from(value: ConfigError) -> Self {
-        ReconError::Config(value)
-    }
-}
-
-impl From<Box<dyn Error>> for ReconError {
-    fn from(value: Box<dyn Error>) -> Self {
-        Self::Generic(value)
     }
 }

@@ -1,54 +1,36 @@
 use std::path::PathBuf;
-
-use crate::{
-    object_manager::kspace_formatting::FormattingMethod,
-    preprocessor::preprocessor::{PhaseCorrection, SampleResolver, SignalNormalization},
-    recon_manager::recon_manager::ReconAlgorithm,
-    resource_manager::{
-        resource_manager::{BaseDirExt, FileLayout},
-        scanner::Scanner,
-    },
-};
-use cs_lib::FistaReconOptions;
-use mr_data::{dim_order::DimOrder, kq_model::KQModel};
 use serde::{Deserialize, Serialize};
-use super::config::TomlConfig;
+use serde::de::DeserializeOwned;
+use toml;
+use object_manager::computer::{Computer};
+use object_manager::scanner::Scanner;
 
-use crate::image_writer::image_writer::ArchiveEngineSettings;
 
-use serde::{Deserialize, Serialize};
+use std::{fs::File, io, io::{Read, Write}, path::Path, time::Duration};
+use std::io::ErrorKind;
+use object_manager::object::ObjectManagerConf;
 
-use super::config::TomlConfig;
-
-use crate::recon_error::ConfigError;
-use serde::{de::DeserializeOwned, Serialize};
-use std::{
-    fs::File,
-    io::{Read, Write},
-    path::Path,
-    time::Duration,
-};
+pub const RECON_SETTINGS_FILENAME: &str = "recon-settings.toml";
+pub const SLURM_OUT_DIRNAME: &str = "slurm_out";
 
 pub trait TomlConfig: Serialize + DeserializeOwned {
-    fn write_to_file<P: AsRef<Path>>(&self, filename: P) -> Result<(), ConfigError> {
+    fn write_to_file<P: AsRef<Path>>(&self, filename: P) -> Result<(), io::Error> {
         let filename = filename.as_ref().with_extension("toml");
-        let mut f = File::create(&filename).map_err(|_| ConfigError::Write(filename.clone()))?;
-        let s = toml::to_string_pretty(self).map_err(|_| ConfigError::Serialize)?;
-        f.write_all(s.as_bytes())
-            .map_err(|_| ConfigError::Write(filename))?;
+        let mut f = File::create(&filename)?;
+        let s = toml::to_string_pretty(self).map_err(|_| io::Error::from(io::ErrorKind::InvalidData) )?;
+        f.write_all(s.as_bytes())?;
         Ok(())
     }
 
-    fn from_file<P: AsRef<Path>>(filename: P) -> Result<Self, ConfigError> {
+    fn from_file<P: AsRef<Path>>(filename: P) -> Result<Self, io::Error> {
         let filename = filename.as_ref().with_extension("toml");
-        let mut f = File::open(&filename).map_err(|_| ConfigError::Read(filename.clone()))?;
+        let mut f = File::open(&filename)?;
         let mut s = String::new();
-        f.read_to_string(&mut s)
-            .map_err(|_| ConfigError::Read(filename))?;
+        f.read_to_string(&mut s)?;
         match toml::from_str(&s) {
             Err(e) => {
                 println!("{:?}",e);
-                return Err(ConfigError::Parse(s))
+                return Err(io::Error::from(io::ErrorKind::InvalidData))
             }
             Ok(t) => return Ok(t)
         }
@@ -61,22 +43,21 @@ pub trait JsonState: Serialize + DeserializeOwned {
         filename.exists()
     }
 
-    fn write_to_file<P: AsRef<Path>>(&self, filename: P) -> Result<(), ConfigError> {
+    fn write_to_file<P: AsRef<Path>>(&self, filename: P) -> Result<(), io::Error> {
         let filename = filename.as_ref().with_extension("state");
-        let mut f = File::create(&filename).map_err(|_| ConfigError::Write(filename.clone()))?;
-        let s = serde_json::to_string_pretty(self).map_err(|_| ConfigError::Serialize)?;
-        f.write_all(s.as_bytes())
-            .map_err(|_| ConfigError::Write(filename))?;
+        let mut f = File::create(&filename)?;
+        let s = serde_json::to_string_pretty(self).map_err(|_| io::Error::from(io::ErrorKind::InvalidData) )?;
+        f.write_all(s.as_bytes())?;
         Ok(())
     }
 
     fn from_file_persistent<P: AsRef<Path>>(
         filename: P,
         total_wait_time_ms: u64,
-    ) -> Result<Self, ConfigError> {
+    ) -> Result<Self, io::Error> {
         let filename = filename.as_ref().with_extension("state");
         if !filename.exists() {
-            return Err(ConfigError::Read(filename.clone()));
+            return Err(io::Error::from(ErrorKind::NotFound));
         }
         // exponential backoff for reading the file. This is resilient to another process writing
         // to the file, potentially corrupting it
@@ -84,7 +65,7 @@ pub trait JsonState: Serialize + DeserializeOwned {
         let b: u64 = (0..n_loads).map(|n| 2u64.pow(n)).sum();
         let wait_const = total_wait_time_ms / b;
 
-        let mut state: Result<Self, ConfigError> = Err(ConfigError::Read(filename.clone()));
+        let mut state: Result<Self, io::Error> = Err(io::Error::from(io::ErrorKind::InvalidData));
         for i in 0..n_loads {
             match Self::from_file(&filename) {
                 Err(err) => {
@@ -97,20 +78,30 @@ pub trait JsonState: Serialize + DeserializeOwned {
         state
     }
 
-    fn from_file<P: AsRef<Path>>(filename: P) -> Result<Self, ConfigError> {
+    fn from_file<P: AsRef<Path>>(filename: P) -> Result<Self, io::Error> {
         let filename = filename.as_ref().with_extension("state");
-        let mut f = File::open(&filename).map_err(|_| ConfigError::Read(filename.clone()))?;
+        let mut f = File::open(&filename)?;
         let mut s = String::new();
-        f.read_to_string(&mut s)
-            .map_err(|_| ConfigError::Read(filename))?;
+        f.read_to_string(&mut s)?;
         match serde_json::from_str(&s) {
             Ok(t) => return Ok(t),
             Err(e) => {
                 println!("err: {:?}",e);
-                return Err(ConfigError::Parse(s))
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
             }
         }
     }
+}
+
+#[derive(Clone)]
+pub struct UserInput {
+    pub project_code: String,
+    pub config_name: String,
+    pub run_number: String,
+    pub raw_data_directory: PathBuf,
+    pub specimen_id: String,
+    pub full_cmd: String,
+    pub subdirs: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -145,6 +136,29 @@ impl UserProfile {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArchiveEngineSettings {
+    pub base_dir: PathBuf,
+    pub computer: Computer,
+    pub archive_user: String,
+}
+
+impl ArchiveEngineSettings {
+    pub fn new<P: AsRef<Path>>(engine_name: &str, engine_user: &str, engine_base_dir: P) -> Self {
+        let computer = Computer::new_remote(engine_name, Some(engine_user));
+        Self {
+            base_dir: engine_base_dir.as_ref().to_path_buf(),
+            computer,
+            archive_user: engine_user.to_string(),
+        }
+    }
+
+    pub fn with_archive_user(mut self, archive_user: &str) -> Self {
+        self.archive_user = archive_user.to_string();
+        self
+    }
+}
+
 impl TomlConfig for UserProfile {}
 
 #[derive(Serialize, Deserialize)]
@@ -157,194 +171,29 @@ pub struct ReconConfig {
     pub require_complete_metadata: Option<bool>,
     pub required_memory_mb: usize,
     pub write_complex: Option<bool>,
-    pub scanner: Scanner,
-    pub raw_dimension_oder: DimOrder,
-    pub raw_file_layout: Option<FileLayout>,
-    pub base_dir_ext: Option<BaseDirExt>,
-    pub kspace_formatting: FormattingMethod,
-    pub phase_correction: Option<PhaseCorrection>,
-    pub signal_normalization: Option<SignalNormalization>,
-    pub sample_resolver: Option<SampleResolver>,
+    pub object_config: ObjectManagerConf,
     pub recon_matrix_size: [usize; 3],
-    pub recon_algorithm: ReconAlgorithm,
-    pub image_filter_coefficients: Option<[f32; 2]>,
     pub scale_reference_image_index: Option<usize>,
     pub scale_undersaturation_fraction: Option<f32>,
 }
 
 impl Default for ReconConfig {
     fn default() -> Self {
-        ReconConfig {
-            retry_delay_seconds: Some(60*10),
-            remote_view_table: None,
-            remote_meta_data: None,
-            scanner: Scanner::default_mrsolutions(),
-            raw_dimension_oder: DimOrder::new(
-                &[788, 14420, 3, 67],
-                &["samples", "views", "echoes", "experiments"],
-            )
-                .expect("failed to build dim order"),
-            raw_file_layout: Some(FileLayout::OneToOne { n: 67 }),
-            base_dir_ext: Some(BaseDirExt::MNumbers { n: 67 }),
-
-            kspace_formatting: FormattingMethod::SingleEchoTest { n_dummy_views: 10 },
-
-            phase_correction: None,
-            signal_normalization: None,
-            sample_resolver: None,
-
-            recon_matrix_size: [788, 480, 480],
-            recon_algorithm: ReconAlgorithm::PhaseMapFISTAL1Wavelet {
-                opts: FistaReconOptions::default().max_iter(50),
-            },
-
-            image_filter_coefficients: Some([0.15, 0.75]),
-            scale_reference_image_index: Some(0),
-            scale_undersaturation_fraction: Some(0.9995),
-            required_memory_mb: 2_000,
-            write_complex: None,
-            resampling_table: None,
-            require_complete_metadata: None,
+        Self {
+            retry_delay_seconds: None,
             smart_scheduling: None,
-        }
-    }
-}
-
-impl ReconConfig {
-    pub fn fse_example() -> Self {
-        ReconConfig {
-            retry_delay_seconds: Some(60*10),
-            scanner: Scanner::default_mrsolutions(),
-            raw_dimension_oder: DimOrder::new(
-                &[788, 14420, 3, 67],
-                &["samples", "views", "echoes", "experiments"],
-            )
-                .expect("failed to build dim order"),
-            raw_file_layout: Some(FileLayout::OneToOne { n: 67 }),
-            base_dir_ext: Some(BaseDirExt::MNumbers { n: 67 }),
-            kspace_formatting: FormattingMethod::FSE {
-                echo_encoding: vec![0, 1, 1],
-                n_dummy_views: 10,
-                strict_view_assignment: false,
-            },
-            phase_correction: Some(PhaseCorrection::Basic { sample_radius: 8 }),
-            signal_normalization: Some(SignalNormalization::MeanSignal {
-                sample_radius: 8,
-                scale: vec![1., 0.5, 0.5],
-            }),
-            sample_resolver: Some(SampleResolver::SumWithRadius {
-                sample_radius: 16.0,
-                reduce_samples: true,
-            }),
-            recon_matrix_size: [788, 480, 480],
-            recon_algorithm: ReconAlgorithm::PhaseMapFISTAL1Wavelet {
-                opts: FistaReconOptions::default().max_iter(50),
-            },
-            image_filter_coefficients: Some([0.15, 0.75]),
-            scale_reference_image_index: Some(0),
-            scale_undersaturation_fraction: Some(0.9995),
-            required_memory_mb: 2_000,
-            write_complex: None,
             resampling_table: None,
             remote_view_table: None,
             remote_meta_data: None,
             require_complete_metadata: None,
-            smart_scheduling: None,
-        }
-    }
-
-    pub fn kq_fse_test_example() -> Self {
-        let kqm = PathBuf::from("./environment/kq_models/kqm");
-        let radius = KQModel::open(&kqm)
-            .expect("failed to load kq model")
-            .sample_cutoff;
-
-        ReconConfig {
-            retry_delay_seconds: Some(60*10),
-            scanner: Scanner::default_mrsolutions(),
-            raw_dimension_oder: DimOrder::new(
-                &[788, 28800, 3, 67],
-                &["samples", "views", "echoes", "experiments"],
-            )
-                .expect("failed to build dim order"),
-            raw_file_layout: Some(FileLayout::OneToOne { n: 67 }),
-            base_dir_ext: Some(BaseDirExt::MNumbers { n: 67 }),
-            kspace_formatting: FormattingMethod::KQFSETest {
-                echo_encoding: vec![0, 0, 0],
-                n_dummy_views: 0,
-                kq_model: kqm,
-            },
-            phase_correction: Some(PhaseCorrection::Basic { sample_radius: 8 }),
-            signal_normalization: Some(SignalNormalization::MeanSignal {
-                sample_radius: 8,
-                scale: vec![1., 0.5, 0.5, 1., 0.5, 0.5, 1., 0.5, 0.5],
-            }),
-            sample_resolver: Some(SampleResolver::SumWithRadius {
-                sample_radius: radius,
-                reduce_samples: true,
-            }),
-            recon_matrix_size: [788, 480, 480],
-            recon_algorithm: ReconAlgorithm::PhaseMapFISTAL1Wavelet {
-                opts: FistaReconOptions::default().max_iter(50),
-            },
-            image_filter_coefficients: Some([0.15, 0.75]),
-            scale_reference_image_index: Some(0),
-            scale_undersaturation_fraction: Some(0.9995),
-            required_memory_mb: 2_000,
+            required_memory_mb: 0,
             write_complex: None,
-            resampling_table: None,
-            remote_view_table: None,
-            remote_meta_data: None,
-            require_complete_metadata: None,
-            smart_scheduling: None,
+            object_config: Default::default(),
+            recon_matrix_size: [512,256,256],
+            scale_reference_image_index: None,
+            scale_undersaturation_fraction: None,
         }
     }
 }
 
 impl TomlConfig for ReconConfig {}
-
-
-#[cfg(test)]
-mod tests {
-    use mr_data::{dim_order::DimOrder};
-    use crate::{config::config::TomlConfig, object_manager::kspace_formatting::FormattingMethod, recon_manager::{pics_wrapper::BartPicsOptions, recon_manager::ReconAlgorithm}, resource_manager::scanner::Scanner};
-    use super::ReconConfig;
-
-    #[test]
-    fn agilent_mgre_24mst01() {
-
-        let conf_file = "/Users/Wyatt/workstation/settings/recon/profiles/24.mst.01/mgre.toml";
-        let dim_ord = DimOrder::new(&[560,4,12600], &["samples","echoes","views"])
-            .unwrap();
-        let formatting = FormattingMethod::MultiEcho { n_dummy_views: 0, strict_view_assignment: true };
-        let algo = ReconAlgorithm::BartPicsL1Wavelet { opts: BartPicsOptions::default() };
-        let conf = ReconConfig {
-            retry_delay_seconds: Some(60 * 10),
-            resampling_table: None,
-            required_memory_mb: 30000,
-            write_complex: Some(true),
-            scanner: Scanner::default_agilent(),
-            raw_dimension_oder: dim_ord,
-            raw_file_layout: None,
-            base_dir_ext: None,
-            kspace_formatting: formatting,
-            phase_correction: None,
-            signal_normalization: None,
-            sample_resolver: None,
-            recon_matrix_size: [590,360,360],
-            recon_algorithm: algo,
-            image_filter_coefficients: Some([0.15,0.75]),
-            scale_reference_image_index: Some(0),
-            scale_undersaturation_fraction: None,
-            remote_view_table: None,
-            remote_meta_data: None,
-            require_complete_metadata: None,
-            smart_scheduling: None,
-        };
-        conf.write_to_file(conf_file).unwrap();
-
-        ReconConfig::from_file(conf_file).unwrap();
-
-    }
-
-}

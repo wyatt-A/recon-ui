@@ -1,12 +1,3 @@
-use crate::{
-    config::{
-        config::{JsonState, TomlConfig},
-        recon_config::ReconConfig,
-    },
-    recon_error::{ConfigError, ReconError},
-    recon_pipeline::SLURM_OUT_DIRNAME,
-    reconstruction::{UserInput, RECON_SETTINGS_FILENAME},
-};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -16,7 +7,11 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
 };
+use std::time::SystemTime;
+use chrono::{DateTime, Local};
 use walkdir::WalkDir;
+use crate::config::{JsonState, ReconConfig, TomlConfig, UserInput, RECON_SETTINGS_FILENAME, SLURM_OUT_DIRNAME};
+use crate::error::{ReconError};
 
 const BIGGUS: &str = "BIGGUS_DISKUS";
 const SETTINGS: &str = "WKS_SETTINGS";
@@ -30,7 +25,7 @@ const STRICT_ENV: bool = true;
 pub enum EnvError {
     CannotGet(String),
     DirNotFound(PathBuf),
-    Generic(Box<dyn Error>),
+    Generic(String),
     FailedToFindRunno(String),
     FailedToFindSettingsFile(PathBuf),
 }
@@ -76,13 +71,13 @@ impl Environment {
             .join("history");
 
         if !recon_cache.exists() {
-            create_dir_all(&recon_cache).map_err(|e| EnvError::Generic(e.into()))?;
+            create_dir_all(&recon_cache).map_err(|e| EnvError::Generic(e.to_string()))?;
         }
 
         Ok(Self {
             biggus,
             recon_settings,
-            current_user: whoami::username(),
+            current_user: whoami::username().unwrap(),
             recon_cache,
         })
     }
@@ -90,21 +85,21 @@ impl Environment {
     fn get_fallback_env() -> Result<Self, EnvError> {
         println!("WARNING: falling back to home directory for big disk");
 
-        let biggus = civm_rust_utils::home_dir();
+        let biggus = dirs::home_dir().expect("cannot get home directory");
         let recon_settings = biggus.join("recon").join("profiles");
         if !recon_settings.exists() {
-            create_dir_all(&recon_settings).map_err(|e| EnvError::Generic(e.into()))?;
+            create_dir_all(&recon_settings).map_err(|e| EnvError::Generic(e.to_string()))?;
         }
 
         let recon_cache = biggus.join("recon").join("history");
         if !recon_cache.exists() {
-            create_dir_all(&recon_cache).map_err(|e| EnvError::Generic(e.into()))?;
+            create_dir_all(&recon_cache).map_err(|e| EnvError::Generic(e.to_string()))?;
         }
 
         Ok(Self {
             biggus,
             recon_settings,
-            current_user: whoami::username(),
+            current_user: whoami::username().unwrap(),
             recon_cache,
         })
     }
@@ -129,12 +124,13 @@ impl Environment {
         &self,
         project_code: impl AsRef<str>,
         config_name: impl AsRef<str>,
-    ) -> Result<ReconConfig, ConfigError> {
+    ) -> Result<ReconConfig, ReconError> {
         let config_file = self
             .recon_settings
             .join(project_code.as_ref())
             .join(config_name.as_ref());
-        ReconConfig::from_file(config_file)
+        let conf = ReconConfig::from_file(config_file)?;
+        Ok(conf)
     }
 
     pub fn slurm_out_directories<S: AsRef<str>>(
@@ -449,15 +445,20 @@ pub struct ReconHistoryEntry {
     recon_config: String,
 }
 
+pub fn time_stamp() -> String {
+    let datetime: DateTime<Local> = SystemTime::now().into();
+    format!("{}",datetime.format("%Y%m%d:%T"))
+}
+
 impl TryFrom<UserInput> for ReconHistoryEntry {
     type Error = ReconError;
 
     fn try_from(value: UserInput) -> Result<Self, Self::Error> {
         let env = Environment::get()?;
-        let date = civm_rust_utils::time_stamp();
+        let date = time_stamp();
         let data_host = env
             .recon_config(&value.project_code, &value.config_name)?
-            .scanner
+            .object_config.data_host.scanner()
             .host()
             .hostname()
             .unwrap_or("unknown".to_string());
