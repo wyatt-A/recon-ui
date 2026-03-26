@@ -22,7 +22,16 @@ pub enum ReconError {
     MaxRetriesReached(String),
     UserCanceled,
     IO(String),
+    Request(RequestError),
 }
+
+impl From<RequestError> for ReconError {
+    fn from(err: RequestError) -> ReconError {
+        ReconError::Request(err)
+    }
+}
+
+
 
 impl From<io::Error> for ReconError {
     fn from(value: io::Error) -> Self {

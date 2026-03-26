@@ -1,9 +1,18 @@
 use std::fmt::Display;
+use std::fs::create_dir_all;
 use std::path::PathBuf;
-use slurm_interface::JobState;
-use recon_ui::config::UserInput;
+use std::process::Command;
+use array_lib::io_cfl::write_cfl;
+use clap::Parser;
+use object_manager::object::ObjectManager;
+use object_manager::{JsonState, TomlConf};
+use object_manager::request::RequestType;
+use recon_lib::{run_cs_cartesian, ReconMethod};
+use slurm_interface::{JobState, SlurmTask};
+use recon_ui::config::{ReconConfig, TomlConfig, UserInput};
 use recon_ui::env::{prompt_yes_no, Environment, ReconHistoryEntry};
 use recon_ui::error::ReconError;
+use crate::ReconAction::New;
 
 #[derive(clap::Parser, Debug)]
 pub struct ReconArgs {
@@ -25,7 +34,17 @@ pub enum ReconAction {
     Restart(RestartArgs),
     /// return the slurm-*.out file logging standard out
     Watch(WatchArgs),
+
+    NewConfig(NewConfigArgs),
 }
+
+#[derive(clap::Args, Debug)]
+pub struct NewConfigArgs {
+    project_code: String,
+    config_name: String,
+}
+
+
 
 #[derive(clap::Args, Debug)]
 pub struct NewReconArgs {
@@ -46,7 +65,7 @@ pub struct NewReconArgs {
     /// Only valid if slurm is also disabled
     #[clap(short = 's',long)]
     run_serial: bool,
-    /// list of sub-directories to visit to collect raw data. These entries will
+    /// list of subdirectories to visit to collect raw data. These entries will
     /// overwrite those existing in the config file and is only valid when the file
     /// layout is specified
     #[clap(short = 'd',long,value_delimiter = ',')]
@@ -124,9 +143,35 @@ pub struct RecentArgs {
     show_command: bool
 }
 
-fn main() {
+fn main() -> Result<(), ReconError> {
+
+    let args = ReconArgs::parse();
+    match args.action {
+        ReconAction::New(args) => new(args)?,
+        ReconAction::NewConfig(args) => new_config(args)?,
+        _=> {todo!()}
+    }
+
+    Ok(())
 
 }
+
+
+fn new_config(args:NewConfigArgs) -> Result<(), ReconError> {
+    let env = Environment::get().expect("failed to resolve environment");
+    let proj_dir = env.recon_settings.join(&args.project_code);
+    let conf_file = proj_dir.join(args.config_name).with_extension("toml");
+    create_dir_all(proj_dir)?;
+    if conf_file.is_file() {
+        println!("{} already found", conf_file.display());
+        return Err(ReconError::Config(format!("{} already exists",conf_file.display())));
+    }
+    let conf = ReconConfig::default();
+    conf.write_to_file(&conf_file)?;
+    println!("created {}",conf_file.display());
+    Ok(())
+}
+
 
 fn new(args: NewReconArgs) -> Result<(), ReconError> {
     let slurm_disabled = args.disable_slurm;
@@ -135,6 +180,8 @@ fn new(args: NewReconArgs) -> Result<(), ReconError> {
     let user_input: UserInput = args.into();
 
     let env = Environment::get().expect("failed to resolve environment");
+
+    println!("loaded env");
 
     // check if the run number has been taken
     if let Some(old_recon) = env.previous_recon(&user_input.run_number) {
@@ -146,9 +193,13 @@ fn new(args: NewReconArgs) -> Result<(), ReconError> {
         }
     }
 
+    println!("checked previous");
+
     // add new entry to the history log
     let new_entry = ReconHistoryEntry::try_from(user_input.clone())?;
     env.append_recon_history_entry(new_entry);
+
+    println!("appended entry");
 
     if !env.active_projects().is_active(&user_input.project_code) {
         println!(
@@ -160,6 +211,82 @@ fn new(args: NewReconArgs) -> Result<(), ReconError> {
         }
     }
     // launch the recon
+    println!("will launch recon");
+
+    let work_dir = env.biggus.join(&user_input.project_code).join(&user_input.run_number);
+    create_dir_all(&work_dir)?;
+
+    let conf = env.recon_config(&user_input.project_code, &user_input.config_name)?;
+
+    let mut o_conf = conf.object_config.clone();
+    o_conf.remote_dir = o_conf.remote_dir.join(&user_input.raw_data_directory);
+    o_conf.to_json_file(work_dir.join("obj_conf"));
+
+    let objm:ObjectManager = o_conf.into();
+    let n_objects = objm.n_objects();
+
+    println!("n_objects: {}", n_objects);
+
+
+    match conf.method {
+        ReconMethod::CSCartesian { settings } => {
+
+            let recon_settings_file = work_dir.join("reco");
+            settings.to_file(&recon_settings_file);
+
+            let slurm_dir = work_dir.join("slurm");
+            create_dir_all(&slurm_dir)?;
+
+            for i in 0..n_objects {
+
+                let mut fetch_raw_cmd = Command::new("copy_data");
+                fetch_raw_cmd.args(&[
+                    work_dir.join("obj_conf").to_string_lossy().to_string(),
+                    i.to_string(),
+                    RequestType::Raw.to_string(),
+                    work_dir.to_string_lossy().to_string(),
+                    format!("raw-{i}"),
+                ]);
+
+                let mut fetch_traj_cmd = Command::new("copy_data");
+                fetch_traj_cmd.args(&[
+                    work_dir.join("obj_conf").to_string_lossy().to_string(),
+                    i.to_string(),
+                    RequestType::Trajectory.to_string(),
+                    work_dir.to_string_lossy().to_string(),
+                    format!("traj-{i}"),
+                ]);
+
+                let mut reco_command = Command::new("reco_cs_cartesian");
+                reco_command.args(&[
+                    recon_settings_file.to_string_lossy().to_string(),
+                    work_dir.to_string_lossy().to_string(),
+                    format!("raw-{i}"),
+                    format!("traj-{i}"),
+                    format!("out-{i}"),
+                ]);
+
+                let jid0 = SlurmTask::new(&slurm_dir,&format!("{}-raw-fetch-{}",&user_input.run_number,i),100)
+                    .command(fetch_raw_cmd)
+                    .begin_delay_sec(10 * i)
+                    .submit();
+
+                let jid1 = SlurmTask::new(&slurm_dir,&format!("{}-traj-fetch-{}",&user_input.run_number,i),100)
+                    .command(fetch_traj_cmd)
+                    .job_dependency_after_ok(jid0)
+                    .submit();
+
+                let jid2 = SlurmTask::new(&slurm_dir,&format!("{}-reco-{}",&user_input.run_number,i),1000)
+                    .command(reco_command)
+                    .job_dependency_after_ok(jid1)
+                    .submit();
+
+
+
+            }
+        },
+        ReconMethod::FFT => {todo!()}
+    }
     Ok(())
 }
 

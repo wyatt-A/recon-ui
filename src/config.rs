@@ -9,6 +9,7 @@ use object_manager::scanner::Scanner;
 use std::{fs::File, io, io::{Read, Write}, path::Path, time::Duration};
 use std::io::ErrorKind;
 use object_manager::object::ObjectManagerConf;
+use recon_lib::ReconMethod;
 
 pub const RECON_SETTINGS_FILENAME: &str = "recon-settings.toml";
 pub const SLURM_OUT_DIRNAME: &str = "slurm_out";
@@ -24,7 +25,7 @@ pub trait TomlConfig: Serialize + DeserializeOwned {
 
     fn from_file<P: AsRef<Path>>(filename: P) -> Result<Self, io::Error> {
         let filename = filename.as_ref().with_extension("toml");
-        let mut f = File::open(&filename)?;
+        let mut f = File::open(&filename).unwrap();
         let mut s = String::new();
         f.read_to_string(&mut s)?;
         match toml::from_str(&s) {
@@ -172,6 +173,7 @@ pub struct ReconConfig {
     pub required_memory_mb: usize,
     pub write_complex: Option<bool>,
     pub object_config: ObjectManagerConf,
+    pub method: ReconMethod,
     pub recon_matrix_size: [usize; 3],
     pub scale_reference_image_index: Option<usize>,
     pub scale_undersaturation_fraction: Option<f32>,
@@ -186,9 +188,10 @@ impl Default for ReconConfig {
             remote_view_table: None,
             remote_meta_data: None,
             require_complete_metadata: None,
-            required_memory_mb: 0,
+            required_memory_mb: 1000,
             write_complex: None,
             object_config: Default::default(),
+            method: Default::default(),
             recon_matrix_size: [512,256,256],
             scale_reference_image_index: None,
             scale_undersaturation_fraction: None,
