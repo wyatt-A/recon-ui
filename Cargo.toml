@@ -18,3 +18,4 @@ dirs = "6.0.0"
 chrono = "0.4.44"
 clap = { version = "4.6.0", features = ["derive"] }
 array-lib = {git = "ssh://git@github.com/wyatt-A/array-lib.git"}
+civm-raw = {git = "ssh://git@github.com/wyatt-A/civm-raw.git"}

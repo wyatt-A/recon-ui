@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use array_lib::io_cfl::write_cfl;
 use clap::Parser;
+use headfile::common::ReconHeadfileParams;
+use headfile::Headfile;
 use object_manager::object::ObjectManager;
 use object_manager::{JsonState, TomlConf};
 use object_manager::request::RequestType;
@@ -12,6 +14,7 @@ use slurm_interface::{JobState, SlurmTask};
 use recon_ui::config::{ReconConfig, TomlConfig, UserInput};
 use recon_ui::env::{prompt_yes_no, Environment, ReconHistoryEntry};
 use recon_ui::error::ReconError;
+use recon_ui::ui::load_settings;
 use crate::ReconAction::New;
 
 #[derive(clap::Parser, Debug)]
@@ -227,6 +230,7 @@ fn new(args: NewReconArgs) -> Result<(), ReconError> {
 
     println!("n_objects: {}", n_objects);
 
+    let scaling_object = 0;
 
     match conf.method {
         ReconMethod::CSCartesian { settings } => {
@@ -281,6 +285,44 @@ fn new(args: NewReconArgs) -> Result<(), ReconError> {
                     .job_dependency_after_ok(jid1)
                     .submit();
 
+                if i == scaling_object {
+                    let mut scale_command = Command::new("write_u16_image_scale");
+                    scale_command.args(&[
+                        work_dir.join(format!("out-{i}")).to_string_lossy().to_string(),
+                        work_dir.join("scale-info").to_string_lossy().to_string(),
+                    ]);
+
+                    SlurmTask::new(&slurm_dir,&format!("{}-scale-info",&user_input.run_number),500)
+                        .command(scale_command)
+                        .job_dependency_after_ok(jid2)
+                        .submit();
+                }
+
+
+
+                let rc = ReconHeadfileParams {
+                    spec_id: user_input.specimen_id.clone(),
+                    civmid: "".to_string(),
+                    project_code: "".to_string(),
+                    n_objects,
+                    scanner_vendor: conf.object_config.data_host.scanner().name(),
+                    run_number: user_input.run_number.clone(),
+                    m_number: format!("m{}",i),
+                    scale_factor_histo_percent: 0.0,
+                    scale_factor_to_civmraw: 0.0,
+                    scale_factor_prescale_target: 0.0,
+                    scale_factor_prescale_maximum: 0.0,
+                    image_code: "".to_string(),
+                    image_tag: "".to_string(),
+                    engine_work_dir: Default::default(),
+                    more_archive_info: Default::default(),
+                };
+
+                let meta = objm.submit_meta_request(i).unwrap();
+                let hf = Headfile::from_hash(&meta);
+                hf.with_recon_params()
+
+                
 
 
             }
