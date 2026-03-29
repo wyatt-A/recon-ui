@@ -3,6 +3,7 @@ use std::fs::create_dir_all;
 use std::path::PathBuf;
 use std::process::Command;
 use array_lib::io_cfl::write_cfl;
+use civm_raw::ImageScale;
 use clap::Parser;
 use headfile::common::ReconHeadfileParams;
 use headfile::Headfile;
@@ -11,7 +12,7 @@ use object_manager::{JsonState, TomlConf};
 use object_manager::request::RequestType;
 use recon_lib::{run_cs_cartesian, ReconMethod};
 use slurm_interface::{JobState, SlurmTask};
-use recon_ui::config::{ReconConfig, TomlConfig, UserInput};
+use recon_ui::config::{ReconConfig, TomlConfig, UserInput, UserProfile};
 use recon_ui::env::{prompt_yes_no, Environment, ReconHistoryEntry};
 use recon_ui::error::ReconError;
 use recon_ui::ui::load_settings;
@@ -220,6 +221,7 @@ fn new(args: NewReconArgs) -> Result<(), ReconError> {
     create_dir_all(&work_dir)?;
 
     let conf = env.recon_config(&user_input.project_code, &user_input.config_name)?;
+    let user_profile = env.user_profile(&user_input.project_code).unwrap();
 
     let mut o_conf = conf.object_config.clone();
     o_conf.remote_dir = o_conf.remote_dir.join(&user_input.raw_data_directory);
@@ -299,30 +301,31 @@ fn new(args: NewReconArgs) -> Result<(), ReconError> {
                 }
 
 
+                let scale_info = ImageScale::from_file(work_dir.join("scale-info")).unwrap();
+
+                let n_dig = n_objects.to_string().chars().count();
 
                 let rc = ReconHeadfileParams {
                     spec_id: user_input.specimen_id.clone(),
-                    civmid: "".to_string(),
-                    project_code: "".to_string(),
+                    civmid: user_profile.username.clone(),
+                    project_code: user_input.project_code.clone(),
                     n_objects,
-                    scanner_vendor: conf.object_config.data_host.scanner().name(),
+                    scanner_vendor: conf.object_config.data_host.scanner().vendor(),
                     run_number: user_input.run_number.clone(),
-                    m_number: format!("m{}",i),
-                    scale_factor_histo_percent: 0.0,
-                    scale_factor_to_civmraw: 0.0,
-                    scale_factor_prescale_target: 0.0,
-                    scale_factor_prescale_maximum: 0.0,
-                    image_code: "".to_string(),
-                    image_tag: "".to_string(),
-                    engine_work_dir: Default::default(),
+                    m_number: format!("m{:0width$}",i,width=n_dig),
+                    scale_factor_histo_percent: scale_info.histogram_percent,
+                    scale_factor_to_civmraw: scale_info.scale_factor,
+                    scale_factor_prescale_target: scale_info.pre_scale_target,
+                    scale_factor_prescale_maximum: scale_info.pre_scale_max,
+                    image_code: conf.object_config.data_host.scanner().image_code(),
+                    image_tag: "imx".to_string(),
+                    engine_work_dir: work_dir.clone(),
                     more_archive_info: Default::default(),
                 };
 
                 let meta = objm.submit_meta_request(i).unwrap();
                 let hf = Headfile::from_hash(&meta);
-                hf.with_recon_params()
-
-                
+                hf.with_recon_params(rc);
 
 
             }

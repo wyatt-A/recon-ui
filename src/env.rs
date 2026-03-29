@@ -10,7 +10,7 @@ use std::{
 use std::time::SystemTime;
 use chrono::{DateTime, Local};
 use walkdir::WalkDir;
-use crate::config::{JsonState, ReconConfig, TomlConfig, UserInput, RECON_SETTINGS_FILENAME, SLURM_OUT_DIRNAME};
+use crate::config::{JsonState, ReconConfig, TomlConfig, UserInput, UserProfile, RECON_SETTINGS_FILENAME, SLURM_OUT_DIRNAME};
 use crate::error::{ReconError};
 
 const BIGGUS: &str = "BIGGUS_DISKUS";
@@ -131,6 +131,12 @@ impl Environment {
             .join(config_name.as_ref());
         let conf = ReconConfig::from_file(config_file)?;
         Ok(conf)
+    }
+
+    /// loads user profile data associated with the project code
+    pub fn user_profile(&self,project_code: impl AsRef<str>) -> Result<UserProfile,io::Error> {
+        let user_file = self.recon_settings.join(project_code.as_ref()).join(&self.current_user);
+        UserProfile::from_file(user_file)
     }
 
     pub fn slurm_out_directories<S: AsRef<str>>(
