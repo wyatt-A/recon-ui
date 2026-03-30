@@ -2,10 +2,11 @@ use std::fmt::Display;
 use std::fs::create_dir_all;
 use std::path::PathBuf;
 use std::process::Command;
-use array_lib::io_cfl::write_cfl;
-use civm_raw::ImageScale;
+use array_lib::io_cfl::{read_cfl, write_cfl};
+use civm_raw::{u16_scale_from_cf32, ImageScale};
+use civm_raw::raw::write_magnitude;
 use clap::Parser;
-use headfile::common::ReconHeadfileParams;
+use headfile::common::{DWHeadfileParams, ReconHeadfileParams};
 use headfile::Headfile;
 use object_manager::object::ObjectManager;
 use object_manager::{JsonState, TomlConf};
@@ -223,12 +224,15 @@ fn new(args: NewReconArgs) -> Result<(), ReconError> {
     let conf = env.recon_config(&user_input.project_code, &user_input.config_name)?;
     let user_profile = env.user_profile(&user_input.project_code).unwrap();
 
+    let archive_info = env.archive_params(&user_input.project_code).unwrap();
+
     let mut o_conf = conf.object_config.clone();
     o_conf.remote_dir = o_conf.remote_dir.join(&user_input.raw_data_directory);
     o_conf.to_json_file(work_dir.join("obj_conf"));
 
     let objm:ObjectManager = o_conf.into();
     let n_objects = objm.n_objects();
+    let n_dig = n_objects.to_string().chars().count();
 
     println!("n_objects: {}", n_objects);
 
@@ -240,70 +244,31 @@ fn new(args: NewReconArgs) -> Result<(), ReconError> {
             let recon_settings_file = work_dir.join("reco");
             settings.to_file(&recon_settings_file);
 
-            let slurm_dir = work_dir.join("slurm");
-            create_dir_all(&slurm_dir)?;
+
 
             for i in 0..n_objects {
 
-                let mut fetch_raw_cmd = Command::new("copy_data");
-                fetch_raw_cmd.args(&[
-                    work_dir.join("obj_conf").to_string_lossy().to_string(),
-                    i.to_string(),
-                    RequestType::Raw.to_string(),
-                    work_dir.to_string_lossy().to_string(),
-                    format!("raw-{i}"),
-                ]);
 
-                let mut fetch_traj_cmd = Command::new("copy_data");
-                fetch_traj_cmd.args(&[
-                    work_dir.join("obj_conf").to_string_lossy().to_string(),
-                    i.to_string(),
-                    RequestType::Trajectory.to_string(),
-                    work_dir.to_string_lossy().to_string(),
-                    format!("traj-{i}"),
-                ]);
+                let (raw,raw_dims) = objm.submit_raw_request(i).unwrap();
+                let (traj,traj_dims) = objm.submit_traj_request(i).unwrap();
 
-                let mut reco_command = Command::new("reco_cs_cartesian");
-                reco_command.args(&[
-                    recon_settings_file.to_string_lossy().to_string(),
-                    work_dir.to_string_lossy().to_string(),
-                    format!("raw-{i}"),
-                    format!("traj-{i}"),
-                    format!("out-{i}"),
-                ]);
+                let raw_file = format!("raw-{i}");
+                let traj_file = format!("traj-{i}");
+                let out_file = format!("out-{i}");
 
-                let jid0 = SlurmTask::new(&slurm_dir,&format!("{}-raw-fetch-{}",&user_input.run_number,i),100)
-                    .command(fetch_raw_cmd)
-                    .begin_delay_sec(10 * i)
-                    .submit();
-
-                let jid1 = SlurmTask::new(&slurm_dir,&format!("{}-traj-fetch-{}",&user_input.run_number,i),100)
-                    .command(fetch_traj_cmd)
-                    .job_dependency_after_ok(jid0)
-                    .submit();
-
-                let jid2 = SlurmTask::new(&slurm_dir,&format!("{}-reco-{}",&user_input.run_number,i),1000)
-                    .command(reco_command)
-                    .job_dependency_after_ok(jid1)
-                    .submit();
+                write_cfl(work_dir.join(&raw_file),&raw,raw_dims);
+                write_cfl(work_dir.join(&traj_file),&traj,traj_dims);
+                run_cs_cartesian(&settings,&work_dir,work_dir.join(&raw_file),work_dir.join(&traj_file),work_dir.join(&out_file));
 
                 if i == scaling_object {
-                    let mut scale_command = Command::new("write_u16_image_scale");
-                    scale_command.args(&[
-                        work_dir.join(format!("out-{i}")).to_string_lossy().to_string(),
-                        work_dir.join("scale-info").to_string_lossy().to_string(),
-                    ]);
-
-                    SlurmTask::new(&slurm_dir,&format!("{}-scale-info",&user_input.run_number),500)
-                        .command(scale_command)
-                        .job_dependency_after_ok(jid2)
-                        .submit();
+                    let scaling_img = format!("out-{i}");
+                    let (data,_) = read_cfl(work_dir.join(scaling_img));
+                    let scale = u16_scale_from_cf32(&data,conf.scale_undersaturation_fraction.unwrap_or(0.9995));
+                    println!("found scale");
+                    scale.to_file(work_dir.join("scale-info")).unwrap();
                 }
 
-
                 let scale_info = ImageScale::from_file(work_dir.join("scale-info")).unwrap();
-
-                let n_dig = n_objects.to_string().chars().count();
 
                 let rc = ReconHeadfileParams {
                     spec_id: user_input.specimen_id.clone(),
@@ -320,13 +285,31 @@ fn new(args: NewReconArgs) -> Result<(), ReconError> {
                     image_code: conf.object_config.data_host.scanner().image_code(),
                     image_tag: "imx".to_string(),
                     engine_work_dir: work_dir.clone(),
-                    more_archive_info: Default::default(),
+                    more_archive_info: archive_info.clone(),
                 };
 
                 let meta = objm.submit_meta_request(i).unwrap();
-                let hf = Headfile::from_hash(&meta);
-                hf.with_recon_params(rc);
+                let mut hf = Headfile::from_hash(&meta);
 
+                hf.insert_toml_table(&settings.to_toml_table(),true);
+
+                if let Some((_,_,bvals)) = hf.get_numeric_vector("b_trace") {
+                    let bvalue = *bvals.get(i).unwrap() as f32;
+                    if let Some((_,_,bvecs)) = hf.get_numeric_vector("bvecs") {
+                        let vecs:Vec<_> = bvecs.chunks_exact(3).collect();
+                        let bvec = vecs.get(i).unwrap();
+                        let bv = bvec.iter().map(|x| *x as f32).collect::<Vec<f32>>();
+                        let dw = DWHeadfileParams {
+                            bvalue,
+                            bval_dir: [bv[0],bv[1],bv[2]],
+                        };
+                        hf = hf.with_diffusion_params(dw);
+                    }
+                }
+                hf = hf.with_recon_params(rc);
+                println!("added recon params");
+                let (data,dims) = read_cfl(work_dir.join(out_file));
+                write_magnitude(&work_dir,hf,&data,dims).unwrap();
 
             }
         },

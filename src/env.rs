@@ -9,6 +9,7 @@ use std::{
 };
 use std::time::SystemTime;
 use chrono::{DateTime, Local};
+use headfile::common::ArchiveParams;
 use walkdir::WalkDir;
 use crate::config::{JsonState, ReconConfig, TomlConfig, UserInput, UserProfile, RECON_SETTINGS_FILENAME, SLURM_OUT_DIRNAME};
 use crate::error::{ReconError};
@@ -139,7 +140,13 @@ impl Environment {
         UserProfile::from_file(user_file)
     }
 
-    pub fn slurm_out_directories<S: AsRef<str>>(
+    pub fn archive_params(&self,project_code: impl AsRef<str>) -> Result<ArchiveParams,io::Error> {
+        let archive_params =self.recon_settings.join(project_code.as_ref()).join("archive-info");
+        ArchiveParams::from_file(archive_params)
+    }
+
+
+pub fn slurm_out_directories<S: AsRef<str>>(
         &self,
         run_number: S,
         project_code: Option<S>,

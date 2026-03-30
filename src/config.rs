@@ -25,15 +25,23 @@ pub trait TomlConfig: Serialize + DeserializeOwned {
 
     fn from_file<P: AsRef<Path>>(filename: P) -> Result<Self, io::Error> {
         let filename = filename.as_ref().with_extension("toml");
-        let mut f = File::open(&filename).unwrap();
-        let mut s = String::new();
-        f.read_to_string(&mut s)?;
-        match toml::from_str(&s) {
+
+        match File::open(&filename) {
             Err(e) => {
-                println!("{:?}",e);
-                return Err(io::Error::from(io::ErrorKind::InvalidData))
+                eprintln!("Failed to open config file {}: {}", filename.display(), e);
+                Err(e)?
             }
-            Ok(t) => return Ok(t)
+            Ok(mut f) => {
+                let mut s = String::new();
+                f.read_to_string(&mut s)?;
+                match toml::from_str(&s) {
+                    Err(e) => {
+                        println!("{:?}",e);
+                        return Err(io::Error::from(io::ErrorKind::InvalidData))
+                    }
+                    Ok(t) => return Ok(t)
+                }
+            }
         }
     }
 }
