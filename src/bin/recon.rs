@@ -16,6 +16,7 @@ use slurm_interface::{JobState, SlurmTask};
 use recon_ui::config::{ReconConfig, TomlConfig, UserInput, UserProfile};
 use recon_ui::env::{prompt_yes_no, Environment, ReconHistoryEntry};
 use recon_ui::error::ReconError;
+use recon_ui::send_to_archive_engine;
 use recon_ui::ui::load_settings;
 use crate::ReconAction::New;
 
@@ -307,10 +308,9 @@ fn new(args: NewReconArgs) -> Result<(), ReconError> {
                     }
                 }
                 hf = hf.with_recon_params(rc);
-                println!("added recon params");
                 let (data,dims) = read_cfl(work_dir.join(out_file));
-                write_magnitude(&work_dir,hf,&data,dims).unwrap();
-
+                let img_dir = write_magnitude(&work_dir,hf,&data,dims).unwrap();
+                send_to_archive_engine(&img_dir,&user_profile);
             }
         },
         ReconMethod::FFT => {todo!()}
