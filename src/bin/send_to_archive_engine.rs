@@ -49,7 +49,7 @@ fn main() {
             archive_engine.computer
                 .run_command("mkdir", vec!["-p", dst.to_str().unwrap()], false)
                 .expect("failed to create directory on remote");
-            archive_engine.computer.copy_dir(&args.image_dir,&dst,args.timeout_sec.unwrap_or(10*60),true);
+            archive_engine.computer.push_dir(&args.image_dir,&dst);
         }else {
             panic!("failed to connect to archive engine");
         }
